@@ -11,6 +11,7 @@ const srColor = Packages.arc.graphics.Color;
 const srTouchable = Packages.arc.scene.event.Touchable;
 const srStyles = Packages.mindustry.ui.Styles;
 const srMouseLeft = Packages.arc.input.KeyCode.mouseLeft;
+const srItemSeq = Packages.mindustry.type.ItemSeq;
 
 let registered = false;
 let warmed = false;
@@ -23,10 +24,10 @@ const helloAt = {};     // id игрока -> время последней об
 const helloDue = {};    // id игрока -> {player, at}: отложенный sr_hello
 let availIds = {};
 let treeOf = {};      // хост: id игрока -> корень открытого у него дерева
-let sentTree = null;  // клиент: дерево, о котором мы последний раз сообщили хосту
+let sentTree = null;  // клиент: дерево, о котором последний раз сообщили хосту
 let availList = null; // клиент: [{id, name, cost}] - что хост разрешил исследовать
 
-let infoTbl = null;   // наша карточка узла
+let infoTbl = null;   // карточка узла
 let infoBtn = null;   // кнопка узла, для которого открыта карточка
 let infoGrace = 0;    // первые кадры после создания карточки не проверяем "мышь ушла"
 let wasShown = false;
@@ -168,7 +169,8 @@ function makePool(root){
         function take(e, limit){
             const toRemove = Math.min(left.v, limit);
             if(toRemove <= 0) return;
-            e.sector.removeItem(item, toRemove);
+            if(e.pending == null) e.pending = new srItemSeq();
+            e.pending.add(item, -toRemove);
             e.seq.remove(item, toRemove);
             left.v -= toRemove;
         }
@@ -184,6 +186,14 @@ function makePool(root){
             });
         }
     };
+    pool.commit = function(){
+        cache.forEach(e => {
+            if(e.pending == null) return;
+            const seq = e.pending;
+            e.pending = null;
+            e.sector.addItems(seq);
+        });
+    };
     return pool;
 }
 
@@ -191,20 +201,31 @@ function spend(n, root){
     const rq = n.requirements;
     const pool = makePool(root);
     let used = 0, complete = true;
-    for(let i = 0; i < rq.length; i++){
-        const need = realAmount(rq[i]);
-        const fin = n.finishedRequirements[i];
-        const left = Math.max(need - Math.round(Number(fin.amount)), 0);
-        const take = Math.max(Math.min(left, pool.get(rq[i].item)), 0);
-        if(take > 0){
-            pool.remove(rq[i].item, take);
-            fin.amount = Math.round(Number(fin.amount)) + take;
-            used += take;
+    try{
+        for(let i = 0; i < rq.length; i++){
+            const need = realAmount(rq[i]);
+            const fin = n.finishedRequirements[i];
+            const left = Math.max(need - Math.round(Number(fin.amount)), 0);
+            const take = Math.max(Math.min(left, pool.get(rq[i].item)), 0);
+            if(take > 0){
+                pool.remove(rq[i].item, take);
+                fin.amount = Math.round(Number(fin.amount)) + take;
+                used += take;
+            }
+            if(Math.round(Number(fin.amount)) < need) complete = false;
         }
-        if(Math.round(Number(fin.amount)) < need) complete = false;
+    }finally{
+        pool.commit();
     }
     try{ n.save(); }catch(e){}
     return {used: used, complete: complete};
+}
+
+function refreshHostItems(){
+    try{
+        if(Vars.headless || Vars.ui == null) return;
+        if(Vars.ui.research.isShown()) Vars.ui.research.rebuildItems();
+    }catch(e){}
 }
 
 function researchable(n){
@@ -230,6 +251,7 @@ function hostResearch(id, rootNm){
     if(n.parent != null && !isUnlocked(n.parent.content)) return "err:parent";
     if(!objectivesDone(n)) return "err:objectives";
     const sp = spend(n, root);
+    if(sp.used > 0) refreshHostItems();
     if(!sp.complete){
         if(sp.used == 0){
             return "err:resources";
@@ -310,11 +332,8 @@ function sendAvailAll(){
 
 function showResult(s){
     s = String(s);
-    let msg;
-    if(s.indexOf("ok:") == 0) msg = Core.bundle.format("sr.ok", s.substring(3));
-    else if(s.indexOf("part:") == 0) msg = Core.bundle.format("sr.part", s.substring(5));
-    else msg = tr("sr." + s.replace(":", "."), s);
-    Vars.ui.showInfoToast(msg, 3);
+    if(s.indexOf("ok:") == 0 || s.indexOf("part:") == 0 || s == "err:resources") return;
+    Vars.ui.showInfoToast(tr("sr." + s.replace(":", "."), s), 3);
 }
 
 function viewOf(){ return Vars.ui.research.view; }
@@ -434,8 +453,6 @@ function showInfoImpl(btn){
         node.objectives.each(o => {
             if(!o.complete()) body.add("> " + o.display()).color(srColor.lightGray).left().row();
         });
-    }else if(node.parent != null && !isUnlockedHost(node.parent.content)){
-        body.add(tr("sr.err.parent", "The previous node is not researched yet.")).color(srColor.scarlet).left().row();
     }else{
         const lines = ent != null ? parseCost(ent.cost) : clientCost(node);
         const pct = progressPct(lines);
@@ -572,7 +589,7 @@ function hookNode(btn){
 
 function attachNodes(){
     viewOf().getChildren().each(el => {
-        if(!isTechNodeButton(el) || attached.containsKey(el)) return;
+        if(attached.containsKey(el) || !isTechNodeButton(el)) return;
         attached.put(el, true);
         hookNode(el);
     });
@@ -589,7 +606,7 @@ function onHello(player, tree){
         helloAt[player.id] = t;
         delete helloDue[player.id];
         sendAvail(player.con, tree);
-    }else if(!same && !helloDue[player.id]){ // то же дерево подряд - не откладываем
+    }else if(!same && !helloDue[player.id]){ 
         helloDue[player.id] = {player: player, at: last + MIN_DELAY};
     }
 }
