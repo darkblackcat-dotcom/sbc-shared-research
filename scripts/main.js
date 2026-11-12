@@ -304,9 +304,6 @@ function buildAvail(rootNm){
     return {msgs: msgs, count: count, blocked: blocked};
 }
 
-// Узел, который у хоста виден (родитель изучен), но закрыт невыполненными целями. Клиент не знает,
-// какие цели не выполнены у хоста, поэтому шлём номера целей (текст клиент возьмёт из своего узла,
-// так он будет на языке клиента).
 function blockedEntry(n){
     const c = n.content;
     if(c == null) return null;
@@ -477,8 +474,7 @@ function showInfoImpl(btn){
     const c = node.content;
     const done = isUnlockedHost(c);
     const ent = done ? null : entryOf(c);
-    const hostBad = blockMap[idOf(c)]; // номера целей, не выполненных у хоста
-    // ent != null: хост считает узел доступным; hostBad: хост считает его закрытым
+    const hostBad = blockMap[idOf(c)];
     const selectable = done || ent != null || (hostBad === undefined && objectivesDone(node));
 
     const t = new Table();
@@ -591,9 +587,6 @@ function isOverCard(btn, t){
     return isWithin(e, btn) || isWithin(e, t);
 }
 
-// Ваниль синхронизирует rules.researched только при входе в игру и по одному узлу при изучении:
-// сброс исследований хостом или пропущенные события оставляют у клиента старое дерево. При открытии
-// окна исследований хост присылает свой список, и если он отличается, дерево пересобирается.
 function applyKnown(){
     const rs = Vars.state.rules.researched;
     const want = {};
@@ -620,18 +613,11 @@ function applyKnown(){
     });
 }
 
-// Условия узлов (особенно секторные) клиент проверяет по своим данным и не знает, что хост их
-// уже выполнил (так и сказано в ванильном selectable). Значок узла берёт замок из поля
-// TechTreeNode.selectable, поэтому для узлов из списка хоста возвращаем его в true.
-// Список таких узлов обновляем редко, а само поле выставляем каждый кадр (checkNodes его сбрасывает).
-// Обратный случай: у клиента условия узла выполнены (например, сектор захвачен у него в сохранении),
-// а у хоста нет, и ваниль показывает такой узел доступным. Хост прислал номера невыполненных целей
-// (blockMap): такой узел показываем закрытым - с замком, красной рамкой и условиями хоста в карточке.
 function hostBlocks(n){
     const c = n.content;
     if(c == null || blockMap[idOf(c)] === undefined) return false;
     if(availIds[idOf(c)] || isUnlockedHost(c)) return false;
-    return objectivesDone(n); // у клиента цели выполнены, ваниль не закрыла бы узел сама
+    return objectivesDone(n);
 }
 
 function findHostSelectable(){
@@ -695,9 +681,6 @@ function pollClick(){
     wasDown = down;
 }
 
-// Рамка узла: ваниль красит её красной по !selectable (цели проверяются по данным клиента).
-// Для узлов, которые хост считает доступными, ставим обычную рамку. Наш update добавлен
-// позже ванильного, поэтому в кадре выполняется последним.
 function frameUpdate(btn){
     if(!Vars.net.client() || availList == null) return;
     const c = btn.userObject.content;
@@ -707,16 +690,12 @@ function frameUpdate(btn){
     btn.getStyle().up = srTex.button;
 }
 
-// Element.update(Runnable) хранит ОДИН обработчик (поле update, update = r), поэтому btn.update(...)
-// стирает ванильный (позиция, иконка, рамка). Достаём ванильный Runnable через рефлексию и
-// оборачиваем: сначала он, потом наша правка рамки.
 let updField = null;
 let updFailed = false;
 function wrapUpdate(btn){
     try{
         if(updFailed) return;
         if(updField == null){
-            // `.class` в этом Rhino не работает - поднимаемся по суперклассам кнопки до Element
             let k = btn.getClass();
             while(k != null && String(k.getName()) != "arc.scene.Element") k = k.getSuperclass();
             updField = k.getDeclaredField("update");
@@ -730,7 +709,7 @@ function wrapUpdate(btn){
             }
         }));
     }catch(e){
-        updFailed = true; // не спамим лог на каждую кнопку
+        updFailed = true;
         Log.err("[shared-research] wrapUpdate: " + e);
     }
 }
@@ -767,7 +746,6 @@ function sendKnown(con){
     sendChunked(con, "sr_known", ids, ",");
 }
 
-// всё, что клиент получает при открытии окна исследований
 function sendSync(con, tree){
     sendKnown(con);
     sendAvail(con, tree);
