@@ -25,6 +25,13 @@ const helloDue = {};    // id игрока -> {player, at}: отложенный
 let availIds = {};
 let treeOf = {};      // хост: id игрока -> корень открытого у него дерева
 let sentTree = null;  // клиент: дерево, о котором последний раз сообщили хосту
+let selNodes = [];    // клиент: узлы дерева, которые хост считает доступными, а ваниль - закрытыми (замок на значке)
+let lockNodes = [];   // клиент: узлы, условия которых выполнены у клиента, но не у хоста - показываем закрытыми
+let lockIds = {};     // клиент: id контента узлов из lockNodes
+let blockMap = {};    // клиент: id контента -> номера целей узла, не выполненных у хоста
+let blockBuf = [];
+let selTick = 0;
+let knownBuf = [];    // клиент: накопленные куски списка изученного от хоста
 let availList = null; // клиент: [{id, name, cost}] - что хост разрешил исследовать
 
 let infoTbl = null;   // карточка узла
@@ -270,6 +277,8 @@ function buildAvail(rootNm){
     let pool = null;
     try{ pool = makePool(root || defaultRoot()); }catch(e){}
     const seen = {};
+    const seenBlocked = {};
+    const blocked = [];
     const msgs = [];
     let chunk = "";
     let count = 0;
@@ -279,7 +288,11 @@ function buildAvail(rootNm){
     }
     for(let i = 0; i < all.length; i++){
         const n = all[i];
-        if(!researchable(n)) continue;
+        if(!researchable(n)){
+            const bl = blockedEntry(n);
+            if(bl != null && !seenBlocked[bl.id]){ seenBlocked[bl.id] = true; blocked.push(bl.id + "\t" + bl.bad.join(",")); }
+            continue;
+        }
         if(seen[idOf(n.content)]) continue;
         seen[idOf(n.content)] = true;
         count++;
@@ -288,16 +301,50 @@ function buildAvail(rootNm){
         chunk += (chunk.length > 0 ? "\n" : "") + e;
     }
     if(chunk.length > 0 || msgs.length == 0) flush();
-    return {msgs: msgs, count: count};
+    return {msgs: msgs, count: count, blocked: blocked};
 }
 
-function sendMsgs(con, msgs){
-    msgs.forEach(m => Call.clientPacketReliable(con, "sr_avail", m));
+// Узел, который у хоста виден (родитель изучен), но закрыт невыполненными целями. Клиент не знает,
+// какие цели не выполнены у хоста, поэтому шлём номера целей (текст клиент возьмёт из своего узла,
+// так он будет на языке клиента).
+function blockedEntry(n){
+    const c = n.content;
+    if(c == null) return null;
+    const t = c.getContentType();
+    if(t != CT.block && t != CT.unit) return null;
+    if(isUnlocked(c)) return null;
+    if(n.parent != null && !isUnlocked(n.parent.content)) return null;
+    const bad = [];
+    try{
+        const o = n.objectives;
+        for(let i = 0; i < o.size; i++){
+            if(!o.get(i).complete()) bad.push(i);
+        }
+    }catch(e){}
+    return bad.length > 0 ? {id: idOf(c), bad: bad} : null;
+}
+
+// Отправка списка кусками по ~3000 символов; заголовок "XY|": X=1 не первый кусок, Y=1 последний.
+function sendChunked(con, packet, items, sep){
+    const parts = [];
+    let cur = "";
+    items.forEach(it => {
+        if(cur.length + it.length + 1 > 3000){ parts.push(cur); cur = ""; }
+        cur += (cur.length > 0 ? sep : "") + it;
+    });
+    parts.push(cur);
+    parts.forEach((p, i) => {
+        Call.clientPacketReliable(con, packet, (i == 0 ? "0" : "1") + (i == parts.length - 1 ? "1" : "0") + "|" + p);
+    });
+}
+
+function sendResult(con, r){
+    r.msgs.forEach(m => Call.clientPacketReliable(con, "sr_avail", m));
+    sendChunked(con, "sr_block", r.blocked, "\n");
 }
 
 function sendAvail(con, rootNm){
-    const r = buildAvail(rootNm);
-    sendMsgs(con, r.msgs);
+    sendResult(con, buildAvail(rootNm));
 }
 
 function warmUp(){
@@ -324,7 +371,7 @@ function sendAvailAll(){
         Object.keys(byTree).forEach(tree => {
             try{
                 const r = buildAvail(tree);
-                byTree[tree].forEach(pl => sendMsgs(pl.con, r.msgs));
+                byTree[tree].forEach(pl => sendResult(pl.con, r));
             }catch(e){}
         });
     });
@@ -430,7 +477,9 @@ function showInfoImpl(btn){
     const c = node.content;
     const done = isUnlockedHost(c);
     const ent = done ? null : entryOf(c);
-    const selectable = done || objectivesDone(node);
+    const hostBad = blockMap[idOf(c)]; // номера целей, не выполненных у хоста
+    // ent != null: хост считает узел доступным; hostBad: хост считает его закрытым
+    const selectable = done || ent != null || (hostBad === undefined && objectivesDone(node));
 
     const t = new Table();
     t.left();
@@ -450,9 +499,16 @@ function showInfoImpl(btn){
         body.add("@completed").left().row();
     }else if(!selectable){
         body.add("@complete").left().row();
-        node.objectives.each(o => {
-            if(!o.complete()) body.add("> " + o.display()).color(srColor.lightGray).left().row();
-        });
+        if(hostBad !== undefined){
+            hostBad.forEach(i => {
+                const o = node.objectives.get(Number(i));
+                if(o != null) body.add("> " + o.display()).color(srColor.lightGray).left().row();
+            });
+        }else{
+            node.objectives.each(o => {
+                if(!o.complete()) body.add("> " + o.display()).color(srColor.lightGray).left().row();
+            });
+        }
     }else{
         const lines = ent != null ? parseCost(ent.cost) : clientCost(node);
         const pct = progressPct(lines);
@@ -535,6 +591,71 @@ function isOverCard(btn, t){
     return isWithin(e, btn) || isWithin(e, t);
 }
 
+// Ваниль синхронизирует rules.researched только при входе в игру и по одному узлу при изучении:
+// сброс исследований хостом или пропущенные события оставляют у клиента старое дерево. При открытии
+// окна исследований хост присылает свой список, и если он отличается, дерево пересобирается.
+function applyKnown(){
+    const rs = Vars.state.rules.researched;
+    const want = {};
+    knownBuf.forEach(id => { want[id] = true; });
+    knownBuf = [];
+    let changed = false;
+    rs.each(u => { if(!want[idOf(u)]) changed = true; });
+    const list = [];
+    Object.keys(want).forEach(id => {
+        const c = findContent(id);
+        if(c == null) return;
+        list.push(c);
+        if(!rs.contains(c)) changed = true;
+    });
+    if(!changed) return;
+    rs.clear();
+    list.forEach(c => rs.add(c));
+    Core.app.post(() => {
+        try{
+            const rd = Vars.ui.research;
+            if(rd.isShown()) rd.rebuildTree(rd.lastNode); // checkNodes + раскладка заново
+            findHostSelectable();
+        }catch(e){}
+    });
+}
+
+// Условия узлов (особенно секторные) клиент проверяет по своим данным и не знает, что хост их
+// уже выполнил (так и сказано в ванильном selectable). Значок узла берёт замок из поля
+// TechTreeNode.selectable, поэтому для узлов из списка хоста возвращаем его в true.
+// Список таких узлов обновляем редко, а само поле выставляем каждый кадр (checkNodes его сбрасывает).
+// Обратный случай: у клиента условия узла выполнены (например, сектор захвачен у него в сохранении),
+// а у хоста нет, и ваниль показывает такой узел доступным. Хост прислал номера невыполненных целей
+// (blockMap): такой узел показываем закрытым - с замком, красной рамкой и условиями хоста в карточке.
+function hostBlocks(n){
+    const c = n.content;
+    if(c == null || blockMap[idOf(c)] === undefined) return false;
+    if(availIds[idOf(c)] || isUnlockedHost(c)) return false;
+    return objectivesDone(n); // у клиента цели выполнены, ваниль не закрыла бы узел сама
+}
+
+function findHostSelectable(){
+    const out = [];
+    const lock = [];
+    const ids = {};
+    if(availList != null){
+        Vars.ui.research.nodes.each(tn => {
+            if(availIds[idOf(tn.node.content)]) out.push(tn);
+            else if(hostBlocks(tn.node)){ lock.push(tn); ids[idOf(tn.node.content)] = true; }
+        });
+    }
+    selNodes = out;
+    lockNodes = lock;
+    lockIds = ids;
+    applyHostSelectable();
+}
+
+function applyHostSelectable(){
+    selNodes.forEach(tn => { tn.selectable = true; });
+    // checkNodes при пересборке дерева сбрасывает поле, поэтому выставляем каждый кадр
+    lockNodes.forEach(tn => { tn.selectable = false; });
+}
+
 function refreshInfo(){
     if(infoBtn != null) showInfo(infoBtn);
 }
@@ -574,7 +695,48 @@ function pollClick(){
     wasDown = down;
 }
 
+// Рамка узла: ваниль красит её красной по !selectable (цели проверяются по данным клиента).
+// Для узлов, которые хост считает доступными, ставим обычную рамку. Наш update добавлен
+// позже ванильного, поэтому в кадре выполняется последним.
+function frameUpdate(btn){
+    if(!Vars.net.client() || availList == null) return;
+    const c = btn.userObject.content;
+    if(lockIds[idOf(c)]){ btn.getStyle().up = srTex.buttonRed; return; } // условия не выполнены у хоста
+    if(isUnlockedHost(c)) return;      // у изученных ваниль сама ставит buttonOver
+    if(!availIds[idOf(c)]) return;     // хост не считает узел доступным - рамка ванильная
+    btn.getStyle().up = srTex.button;
+}
+
+// Element.update(Runnable) хранит ОДИН обработчик (поле update, update = r), поэтому btn.update(...)
+// стирает ванильный (позиция, иконка, рамка). Достаём ванильный Runnable через рефлексию и
+// оборачиваем: сначала он, потом наша правка рамки.
+let updField = null;
+let updFailed = false;
+function wrapUpdate(btn){
+    try{
+        if(updFailed) return;
+        if(updField == null){
+            // `.class` в этом Rhino не работает - поднимаемся по суперклассам кнопки до Element
+            let k = btn.getClass();
+            while(k != null && String(k.getName()) != "arc.scene.Element") k = k.getSuperclass();
+            updField = k.getDeclaredField("update");
+            updField.setAccessible(true);
+        }
+        const orig = updField.get(btn);
+        updField.set(btn, new java.lang.Runnable({
+            run: function(){
+                if(orig != null) orig.run();
+                try{ frameUpdate(btn); }catch(e){}
+            }
+        }));
+    }catch(e){
+        updFailed = true; // не спамим лог на каждую кнопку
+        Log.err("[shared-research] wrapUpdate: " + e);
+    }
+}
+
 function hookNode(btn){
+    wrapUpdate(btn);
     if(Vars.mobile){
         btn.clicked(() => {
             if(!Vars.net.client() || viewOf().moved) return;
@@ -597,6 +759,20 @@ function attachNodes(){
 
 function nowMs(){ return java.lang.System.currentTimeMillis(); }
 
+// Список изученного хостом (то же, что ваниль кладёт в rules.researched при входе в игру).
+// Шлётся кусками по ~3000 символов: заголовок "XY|", X=1 не первый кусок, Y=1 последний.
+function sendKnown(con){
+    const ids = [];
+    TechTree.all.each(n => { if(n.content != null && isUnlocked(n.content)) ids.push(idOf(n.content)); });
+    sendChunked(con, "sr_known", ids, ",");
+}
+
+// всё, что клиент получает при открытии окна исследований
+function sendSync(con, tree){
+    sendKnown(con);
+    sendAvail(con, tree);
+}
+
 function onHello(player, tree){
     const same = treeOf[player.id] === tree;
     treeOf[player.id] = tree;
@@ -605,7 +781,7 @@ function onHello(player, tree){
     if(t - last >= MIN_DELAY){
         helloAt[player.id] = t;
         delete helloDue[player.id];
-        sendAvail(player.con, tree);
+        sendSync(player.con, tree);
     }else if(!same && !helloDue[player.id]){ 
         helloDue[player.id] = {player: player, at: last + MIN_DELAY};
     }
@@ -635,6 +811,26 @@ function setup(){
         catch(e){}
     });
 
+    Vars.netClient.addPacketHandler("sr_known", s => {
+        s = String(s);
+        if(s.charAt(0) == "0") knownBuf = [];
+        s.substring(3).split(",").forEach(id => { if(id.length > 0) knownBuf.push(id); });
+        if(s.charAt(1) == "1") applyKnown();
+    });
+    Vars.netClient.addPacketHandler("sr_block", s => {
+        s = String(s);
+        if(s.charAt(0) == "0") blockBuf = [];
+        s.substring(3).split("\n").forEach(l => { if(l.length > 0) blockBuf.push(l); });
+        if(s.charAt(1) != "1") return;
+        const m = {};
+        blockBuf.forEach(l => {
+            const p = String(l).split("\t");
+            m[p[0]] = p.length > 1 ? p[1].split(",").map(x => parseInt(x)) : [];
+        });
+        blockMap = m;
+        blockBuf = [];
+        Core.app.post(() => { try{ findHostSelectable(); }catch(e){} refreshInfo(); });
+    });
     Vars.netClient.addPacketHandler("sr_avail", s => {
         s = String(s);
         if(s.indexOf("0|") == 0 || availList == null){ availList = []; availIds = {}; }
@@ -646,6 +842,7 @@ function setup(){
             availIds[id] = true;
             availList.push({id: id, name: p.length > 1 ? String(p[1]) : id, cost: p.length > 2 ? String(p[2]) : "-"});
         });
+        Core.app.post(() => { try{ findHostSelectable(); }catch(e){} });
         refreshInfo();
     });
     Vars.netClient.addPacketHandler("sr_result", s => {
@@ -680,7 +877,7 @@ Events.run(EventType.Trigger.update, () => {
         delete helloDue[id];
         if(!d.player.isAdded() || d.player.con == null) return;
         helloAt[id] = nowMs();
-        try{ sendAvail(d.player.con, treeOf[id]); }
+        try{ sendSync(d.player.con, treeOf[id]); }
         catch(e){}
     });
 });
@@ -688,6 +885,10 @@ Events.run(EventType.Trigger.update, () => {
 Events.on(EventType.WorldLoadEvent, () => {
     if(Vars.net.client()){
         availList = null;
+        selNodes = [];
+        lockNodes = [];
+        lockIds = {};
+        blockMap = {};
         sentTree = null;
         sendHello();
     }
@@ -699,6 +900,10 @@ Events.run(EventType.Trigger.update, () => {
     let helloSent = false; // hello уже отправлен в этом кадре
     if(sentTree !== null && cur !== sentTree){
         availList = null;
+        selNodes = [];
+        lockNodes = [];
+        lockIds = {};
+        blockMap = {};
         hideInfo();
         sendHello();
         helloSent = true;
@@ -723,6 +928,8 @@ Events.run(EventType.Trigger.update, () => {
         v.hoverNode = Vars.mobile ? null : infoBtn;
 
         attachNodes();
+        if(++selTick % 30 == 0) findHostSelectable();
+        applyHostSelectable();
 
         if(Vars.mobile){
             if(infoTbl != null && Core.input.justTouched()){
