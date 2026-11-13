@@ -18,7 +18,7 @@ let warmed = false;
 let availQueued = false; // хост: рассылка списка уже запланирована на следующий кадр
 
 // хост: минимальная пауза между запросами одного игрока
-const MIN_DELAY = 100; // мс
+const MIN_DELAY = 1500; // мс
 const reqAt = {};       // id игрока -> время последнего sr_request
 const helloAt = {};     // id игрока -> время последней обработки sr_hello
 const helloDue = {};    // id игрока -> {player, at}: отложенный sr_hello
@@ -297,7 +297,7 @@ function buildAvail(rootNm){
         seen[idOf(n.content)] = true;
         count++;
         const e = idOf(n.content) + "\t" + n.content.localizedName + "\t" + costData(n, pool);
-        if(chunk.length + e.length + 1 > 3000) flush();
+        if(chunk.length + e.length + 1 > 1500) flush();
         chunk += (chunk.length > 0 ? "\n" : "") + e;
     }
     if(chunk.length > 0 || msgs.length == 0) flush();
@@ -321,12 +321,12 @@ function blockedEntry(n){
     return bad.length > 0 ? {id: idOf(c), bad: bad} : null;
 }
 
-// Отправка списка кусками по ~3000 символов; заголовок "XY|": X=1 не первый кусок, Y=1 последний.
+// Отправка списка кусками по ~1500 символов; заголовок "XY|": X=1 не первый кусок, Y=1 последний.
 function sendChunked(con, packet, items, sep){
     const parts = [];
     let cur = "";
     items.forEach(it => {
-        if(cur.length + it.length + 1 > 3000){ parts.push(cur); cur = ""; }
+        if(cur.length + it.length + 1 > 1500){ parts.push(cur); cur = ""; }
         cur += (cur.length > 0 ? sep : "") + it;
     });
     parts.push(cur);
@@ -739,7 +739,7 @@ function attachNodes(){
 function nowMs(){ return java.lang.System.currentTimeMillis(); }
 
 // Список изученного хостом (то же, что ваниль кладёт в rules.researched при входе в игру).
-// Шлётся кусками по ~3000 символов: заголовок "XY|", X=1 не первый кусок, Y=1 последний.
+// Шлётся кусками по ~1500 символов: заголовок "XY|", X=1 не первый кусок, Y=1 последний.
 function sendKnown(con){
     const ids = [];
     TechTree.all.each(n => { if(n.content != null && isUnlocked(n.content)) ids.push(idOf(n.content)); });
