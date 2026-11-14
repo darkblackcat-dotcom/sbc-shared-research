@@ -235,6 +235,12 @@ function refreshHostItems(){
     }catch(e){}
 }
 
+// мод изучает только блоки и юниты; ресурсы, жидкости и сектора открываются по-другому
+function isResearchType(c){
+    const t = c.getContentType();
+    return t == CT.block || t == CT.unit;
+}
+
 function researchable(n){
     const c = n.content;
     if(c == null) return false;
@@ -534,7 +540,7 @@ function showInfoImpl(btn){
     head.add(new Table()).grow();
     head.add(body).pad(9).left().growX();
 
-    if(!done && Vars.mobile){
+    if(!done && Vars.mobile && isResearchType(c)){
         head.row();
         const can = ent != null;
         const label = tr("research", tr("sr.request", "Request research"));
